@@ -3,6 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
+import {webcrypto} from 'node:crypto';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
 const bank=JSON.parse(html.match(/<script id="question-bank" type="application\/json">([\s\S]*?)<\/script>/)[1]);
@@ -33,13 +34,32 @@ check('Single-file app has no network dependency',()=>{
 });
 const nodes=new Map();let inputChoices=[];
 class NodeStub{constructor(){this._html='';this.value='';this.textContent='';this.disabled=false}set innerHTML(value){this._html=value;if(this===nodes.get('app'))for(const key of [...nodes.keys()])if(!['app','question-bank','classic-bank','exit-dialog','cancel-exit','confirm-exit'].includes(key))nodes.delete(key)}get innerHTML(){return this._html}insertAdjacentHTML(_,v){this._html+=v}addEventListener(){}focus(){}scrollIntoView(){}showModal(){}close(){}querySelectorAll(sel){return sel==='input[name="answer"]:checked'?inputChoices.map(value=>({value})):[]}querySelector(){return null}}
+NodeStub.prototype.setAttribute=function(name,value){this[name]=value};
 for(const id of ['app','question-bank','classic-bank','exit-dialog','cancel-exit','confirm-exit'])nodes.set(id,new NodeStub());nodes.get('question-bank').textContent=JSON.stringify(bank);nodes.get('classic-bank').textContent=JSON.stringify(classics);
 const doc={getElementById(id){if(nodes.has(id))return nodes.get(id);if([...nodes.values()].some(n=>n.innerHTML.includes(`id="${id}"`))){nodes.set(id,new NodeStub());return nodes.get(id)}return null}};
 let registered;
 doc.modelContext={registerTool(t){registered=t}};
-const context=vm.createContext({document:doc,window:{addEventListener(){},scrollTo(){}},requestAnimationFrame(){},structuredClone,console,Math,Set,Error,Number,Object,JSON});
-vm.runInContext(source+'\nglobalThis.api={BANK,CLASSICS,state,expected,questionInfo,pickQuestions,distractors,quoteExists,esc,start,submit,next,back,revise,showResults,renderExercise,home};',context);
+const context=vm.createContext({document:doc,window:{addEventListener(){},scrollTo(){}},requestAnimationFrame(){},crypto:webcrypto,TextEncoder,structuredClone,console,Math,Set,Error,Number,Object,JSON});
+vm.runInContext(source+'\nglobalThis.api={BANK,CLASSICS,state,expected,questionInfo,pickQuestions,distractors,quoteExists,esc,start,submit,next,back,revise,showResults,renderExercise,home,submitEntry};',context);
 const a=context.api;
+assert.equal(a.state.screen,'locked');
+assert.deepEqual(Object.keys(registered.execute({})),['screen']);
+a.start('story',1,3);assert.equal(a.state.screen,'locked');
+await a.submitEntry({preventDefault(){}});assert.equal(a.state.screen,'locked');assert.ok(doc.getElementById('entry-error').textContent);
+doc.getElementById('entry-password').value='1234';await a.submitEntry({preventDefault(){}});assert.equal(a.state.screen,'locked');assert.equal(doc.getElementById('entry-password').value,'');
+assert.equal(doc.getElementById('entry-submit').disabled,false);
+const realCrypto=context.crypto;context.crypto={subtle:{digest(){throw Error('unavailable')}}};
+doc.getElementById('entry-password').value='test-input';await a.submitEntry({preventDefault(){}});assert.equal(a.state.screen,'locked');assert.equal(doc.getElementById('entry-submit').disabled,false);assert.equal(doc.getElementById('entry-password').value,'');assert.equal(doc.getElementById('entry-password')['aria-invalid'],'true');context.crypto=realCrypto;
+passed++;console.log('PASS Entry gate blocks blank/wrong input, start, WebMCP data, and digest errors');
+assert.ok(!/sessionStorage|localStorage|document\.cookie/.test(source));
+if(process.env.ENTRY_TEST_PASSWORD){
+ doc.getElementById('entry-password').value=process.env.ENTRY_TEST_PASSWORD.replace(/[0-9]/g,c=>String.fromCharCode(c.charCodeAt(0)+0xfee0));const entryField=doc.getElementById('entry-password');
+ await a.submitEntry({preventDefault(){}});assert.equal(a.state.screen,'home');assert.equal(entryField.value,'');assert.equal(registered.execute({}).total,1000);
+ passed++;console.log('PASS Full-width entry unlocks learning without storing the password or admission');
+}else{
+ console.log('SKIP Known-password check: set ENTRY_TEST_PASSWORD to run it (the password is not stored in tests)');
+ vm.runInContext('admitted=true;home()',context); // Continue unrelated lesson regressions in an admitted fixture.
+}
 check('Every objective question has 3 unique options including its correct answer',()=>{
  for(const q of a.BANK)for(let s=0;s<5;s++)if(a.questionInfo(q,s).type==='choice'){const choices=a.distractors(q,s);assert.equal(choices.length,3);assert.equal(new Set(choices).size,3);assert.ok(choices.includes(a.expected(q,s)))}
 });
